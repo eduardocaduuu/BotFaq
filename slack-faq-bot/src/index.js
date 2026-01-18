@@ -1,7 +1,7 @@
 const { App } = require('@slack/bolt');
 require('dotenv').config();
 
-const { findAnswer } = require('./faq');
+const { searchFaq, getFaqById } = require('./faq');
 const TEXTS = require('./texts-ptbr');
 const { startHealthServer } = require('./health');
 
@@ -70,8 +70,6 @@ app.command('/faq', async ({ command, ack, client }) => {
 // Evento: App Home Opened
 app.event('app_home_opened', async ({ event, client, logger }) => {
   try {
-    const rhUrl = process.env.RH_URL || 'https://example.com';
-
     await client.views.publish({
       user_id: event.user,
       view: {
@@ -82,8 +80,7 @@ app.event('app_home_opened', async ({ event, client, logger }) => {
           {
             type: 'actions',
             elements: [
-              { type: 'button', text: { type: 'plain_text', text: TEXTS.BTN_OPEN_FAQ }, style: 'primary', action_id: 'home_open_faq' },
-              { type: 'button', text: { type: 'plain_text', text: TEXTS.BTN_RH }, url: rhUrl, action_id: 'home_open_rh' }
+              { type: 'button', text: { type: 'plain_text', text: TEXTS.BTN_OPEN_FAQ }, style: 'primary', action_id: 'home_open_faq' }
             ]
           },
           { type: 'divider' },
@@ -137,32 +134,67 @@ app.action(/^home_cat_/, async ({ ack, body, client, action }) => {
   }
 });
 
-// Action: Botão RH (apenas ack, pois é URL button)
-app.action('home_open_rh', async ({ ack }) => {
-  await ack();
-});
-
 // Listener da submissão da modal
 app.view('faq_submission', async ({ ack, view, client, body }) => {
   await ack();
 
   const userId = body.user.id;
   const query = view.state.values.search_block.search_input.value;
-  const answer = findAnswer(query);
-
-  let text = TEXTS.NO_ANSWER_FOUND;
-  if (answer) {
-    text = `*${answer.question}*\n${answer.answer}`;
-  }
+  const { best, suggestions } = searchFaq(query);
 
   try {
-    // Responde via DM para o usuário
+    if (best) {
+      // Resposta exata encontrada
+      await client.chat.postMessage({
+        channel: userId,
+        text: `*${best.question}*\n${best.answer}`
+      });
+    } else if (suggestions.length > 0) {
+      // Sugestões encontradas (score baixo)
+      await client.chat.postMessage({
+        channel: userId,
+        text: TEXTS.SUGGESTION_HEADER,
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: TEXTS.SUGGESTION_HEADER } },
+          {
+            type: 'actions',
+            elements: suggestions.map(item => ({
+              type: 'button',
+              text: { type: 'plain_text', text: item.question },
+              value: item.id,
+              action_id: 'faq_suggestion_select'
+            }))
+          }
+        ]
+      });
+    } else {
+      // Nenhuma correspondência
+      await client.chat.postMessage({
+        channel: userId,
+        text: TEXTS.NO_ANSWER_FOUND
+      });
+    }
+  } catch (error) {
+    console.error('Erro ao enviar DM:', error);
+  }
+});
+
+// Action: Seleção de sugestão (botões)
+app.action('faq_suggestion_select', async ({ ack, body, client, action }) => {
+  await ack();
+  
+  const item = getFaqById(action.value);
+  const text = item 
+    ? `*${item.question}*\n${item.answer}` 
+    : TEXTS.NO_ANSWER_FOUND;
+
+  try {
     await client.chat.postMessage({
-      channel: userId,
+      channel: body.user.id,
       text: text
     });
   } catch (error) {
-    console.error('Erro ao enviar DM:', error);
+    console.error('Erro ao responder sugestão:', error);
   }
 });
 
